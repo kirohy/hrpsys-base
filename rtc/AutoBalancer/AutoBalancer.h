@@ -146,6 +146,8 @@ class AutoBalancer
   InPort<TimedPoint3D> m_refFootOriginExtMomentIn;
   TimedBoolean m_refFootOriginExtMomentIsHoldValue;
   InPort<TimedBoolean> m_refFootOriginExtMomentIsHoldValueIn;
+  TimedPoint3D m_comOffset;
+  InPort<TimedPoint3D> m_comOffsetIn;
   // for debug
   TimedPoint3D m_cog;
   
@@ -277,6 +279,9 @@ class AutoBalancer
   hrp::Vector3 sbp_offset, sbp_cog_offset;
   enum {MODE_NO_FORCE, MODE_REF_FORCE, MODE_REF_FORCE_WITH_FOOT, MODE_REF_FORCE_RFU_EXT_MOMENT} use_force;
   std::vector<hrp::Vector3> ref_forces, ref_moments;
+
+  hrp::Vector3 com_offset;
+  std::vector<IIRFilter> com_offset_filters;
 
   unsigned int m_debugLevel;
   bool is_legged_robot, is_stop_mode, is_hand_fix_mode, is_hand_fix_initial;

@@ -64,6 +64,7 @@ AutoBalancer::AutoBalancer(RTC::Manager* manager)
       m_refFootOriginExtMomentIn("refFootOriginExtMoment", m_refFootOriginExtMoment),
       m_refFootOriginExtMomentIsHoldValueIn("refFootOriginExtMomentIsHoldValue", m_refFootOriginExtMomentIsHoldValue),
       m_actContactStatesIn("actContactStates", m_actContactStates),
+      m_comOffsetIn("comOffset", m_comOffset),
       m_qOut("q", m_qRef),
       m_zmpOut("zmpOut", m_zmp),
       m_basePosOut("basePosOut", m_basePos),
@@ -109,6 +110,7 @@ RTC::ReturnCode_t AutoBalancer::onInitialize()
     addInPort("actContactStates", m_actContactStatesIn);
     addInPort("refFootOriginExtMoment", m_refFootOriginExtMomentIn);
     addInPort("refFootOriginExtMomentIsHoldValue", m_refFootOriginExtMomentIsHoldValueIn);
+    addInPort("comOffset", m_comOffsetIn);
 
     // Set OutPort buffer
     addOutPort("q", m_qOut);
@@ -358,6 +360,10 @@ RTC::ReturnCode_t AutoBalancer::onInitialize()
     //use_force = MODE_NO_FORCE;
     use_force = MODE_REF_FORCE;
 
+    com_offset = hrp::Vector3(0,0,0);
+    com_offset_filters.resize(3);
+    for (int i = 0; i < 3; i++) com_offset_filters[i].setParameterAsBiquad(1.0, 1/std::sqrt(2), 1.0/m_dt);
+
     if (ikp.find("rleg") != ikp.end() && ikp.find("lleg") != ikp.end()) {
       is_legged_robot = true;
     } else {
@@ -490,6 +496,14 @@ RTC::ReturnCode_t AutoBalancer::onExecute(RTC::UniqueId ec_id)
       }
       gg->set_act_contact_states(tmp_contacts);
     }
+    if (m_comOffsetIn.isNew()) {
+      m_comOffsetIn.read();
+      com_offset(0) = m_comOffset.data.x;
+      com_offset(1) = m_comOffset.data.y;
+      com_offset(2) = m_comOffset.data.z;
+    }
+    for (int i = 0; i < 3; i++) com_offset(i) = com_offset_filters[i].passFilter(com_offset(i));
+    sbp_offset = com_offset;
 
     // Calculation
     Guard guard(m_mutex);
@@ -525,6 +539,7 @@ RTC::ReturnCode_t AutoBalancer::onExecute(RTC::UniqueId ec_id)
 //        }
 //        updateInvDynStateBuffer(idsb);
 
+        ref_zmp += com_offset;
         rel_ref_zmp = m_robot->rootLink()->R.transpose() * (ref_zmp - m_robot->rootLink()->p);
       } else {
         rel_ref_zmp = input_zmp;
