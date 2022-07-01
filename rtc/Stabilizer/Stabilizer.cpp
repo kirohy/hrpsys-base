@@ -63,6 +63,7 @@ Stabilizer::Stabilizer(RTC::Manager* manager)
     // <rtc-template block="initializer">
     m_qCurrentIn("qCurrent", m_qCurrent),
     m_qRefIn("qRef", m_qRef),
+    m_tauRefIn("tauRef", m_tauRef),
     m_rpyIn("rpy", m_rpy),
     m_zmpRefIn("zmpRef", m_zmpRef),
     m_StabilizerServicePort("StabilizerService"),
@@ -128,6 +129,7 @@ RTC::ReturnCode_t Stabilizer::onInitialize()
   // Set InPort buffers
   addInPort("qCurrent", m_qCurrentIn);
   addInPort("qRef", m_qRefIn);
+  addInPort("tauRef", m_tauRefIn);
   addInPort("rpy", m_rpyIn);
   addInPort("zmpRef", m_zmpRefIn);
   addInPort("basePosIn", m_basePosIn);
@@ -570,6 +572,9 @@ RTC::ReturnCode_t Stabilizer::onExecute(RTC::UniqueId ec_id)
   if (m_qRefIn.isNew()) {
     m_qRefIn.read();
   }
+  if (m_tauRefIn.isNew()) {
+    m_tauRefIn.read();
+  }
   if (m_qCurrentIn.isNew()) {
     m_qCurrentIn.read();
   }
@@ -672,6 +677,11 @@ RTC::ReturnCode_t Stabilizer::onExecute(RTC::UniqueId ec_id)
       for ( int i = 0; i < m_robot->numJoints(); i++ ){
         m_qRef.data[i] = m_robot->joint(i)->q;
         m_tau.data[i] = m_robot->joint(i)->u;
+      }
+      if ( m_robot->numJoints() == m_tauRef.data.length() ) {
+        for ( int i = 0; i < m_robot->numJoints(); i++ ){
+          m_tau.data[i] += m_tauRef.data[i];
+        }
       }
       m_zmp.data.x = rel_act_zmp(0);
       m_zmp.data.y = rel_act_zmp(1);

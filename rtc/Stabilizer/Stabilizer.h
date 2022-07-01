@@ -163,6 +163,7 @@ class Stabilizer
   // </rtc-template>
   RTC::TimedDoubleSeq m_qCurrent;
   RTC::TimedDoubleSeq m_qRef;
+  RTC::TimedDoubleSeq m_tauRef;
   RTC::TimedDoubleSeq m_tau;
   RTC::TimedOrientation3D m_rpy;
   RTC::TimedPoint3D m_zmpRef;
@@ -197,6 +198,7 @@ class Stabilizer
   // <rtc-template block="inport_declare">
   RTC::InPort<RTC::TimedDoubleSeq> m_qCurrentIn;
   RTC::InPort<RTC::TimedDoubleSeq> m_qRefIn;
+  RTC::InPort<RTC::TimedDoubleSeq> m_tauRefIn;
   RTC::InPort<RTC::TimedOrientation3D> m_rpyIn;
   RTC::InPort<RTC::TimedPoint3D> m_zmpRefIn;
   RTC::InPort<RTC::TimedPoint3D> m_basePosIn;
