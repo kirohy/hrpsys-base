@@ -51,6 +51,7 @@
   <run_depend>openhrp3</run_depend>
   <run_depend>python-tk</run_depend>
   <run_depend>sdl</run_depend>
+  <run_depend>python3-packaging</run_depend>
 
   <!-- <test_depend>openhrp3</test_depend> -->
   <export>
