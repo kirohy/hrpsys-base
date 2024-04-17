@@ -63,9 +63,11 @@ Stabilizer::Stabilizer(RTC::Manager* manager)
     // <rtc-template block="initializer">
     m_qCurrentIn("qCurrent", m_qCurrent),
     m_qRefIn("qRef", m_qRef),
+    m_tauRefIn("tauRef", m_tauRef),
     m_rpyIn("rpy", m_rpy),
     m_zmpRefIn("zmpRef", m_zmpRef),
     m_StabilizerServicePort("StabilizerService"),
+    m_RobotHardwareServicePort("RobotHardwareService"),
     m_basePosIn("basePosIn", m_basePos),
     m_baseRpyIn("baseRpyIn", m_baseRpy),
     m_contactStatesIn("contactStates", m_contactStates),
@@ -102,6 +104,7 @@ Stabilizer::Stabilizer(RTC::Manager* manager)
     st_algorithm(OpenHRP::StabilizerService::TPCC),
     emergency_check_mode(OpenHRP::StabilizerService::NO_CHECK),
     szd(NULL),
+    joint_control_mode(OpenHRP::RobotHardwareService::POSITION),
     // </rtc-template>
     m_debugLevel(0)
 {
@@ -126,6 +129,7 @@ RTC::ReturnCode_t Stabilizer::onInitialize()
   // Set InPort buffers
   addInPort("qCurrent", m_qCurrentIn);
   addInPort("qRef", m_qRefIn);
+  addInPort("tauRef", m_tauRefIn);
   addInPort("rpy", m_rpyIn);
   addInPort("zmpRef", m_zmpRefIn);
   addInPort("basePosIn", m_basePosIn);
@@ -167,9 +171,11 @@ RTC::ReturnCode_t Stabilizer::onInitialize()
   m_StabilizerServicePort.registerProvider("service0", "StabilizerService", m_service0);
   
   // Set service consumers to Ports
+  m_RobotHardwareServicePort.registerConsumer("service0", "RobotHardwareService", m_robotHardwareService0);
   
   // Set CORBA Service Ports
   addPort(m_StabilizerServicePort);
+  addPort(m_RobotHardwareServicePort);
   
   // </rtc-template>
   RTC::Properties& prop = getProperties();
@@ -292,6 +298,8 @@ RTC::ReturnCode_t Stabilizer::onInitialize()
       ikp.prev_d_pos_swing = hrp::Vector3::Zero();
       ikp.prev_d_rpy_swing = hrp::Vector3::Zero();
       //
+      ikp.contact_phase = SUPPORT_PHASE;
+      ikp.phase_time = 0;
       stikp.push_back(ikp);
       jpe_v.push_back(hrp::JointPathExPtr(new hrp::JointPathEx(m_robot, m_robot->link(ee_base), m_robot->link(ee_target), dt, false, std::string(m_profile.instance_name))));
       // Fix for toe joint
@@ -303,6 +311,13 @@ RTC::ReturnCode_t Stabilizer::onInitialize()
           }
           jpe_v.back()->setOptionalWeightVector(optw);
       }
+      for (int j = 0; j < jpe_v.back()->numJoints(); j++ ) {
+          stikp.back().support_pgain = hrp::dvector::Constant(jpe_v.back()->numJoints(),100);
+          stikp.back().support_dgain = hrp::dvector::Constant(jpe_v.back()->numJoints(),100);
+          stikp.back().landing_pgain = hrp::dvector::Constant(jpe_v.back()->numJoints(),100);
+          stikp.back().landing_dgain = hrp::dvector::Constant(jpe_v.back()->numJoints(),100);
+      }
+
       target_ee_p.push_back(hrp::Vector3::Zero());
       target_ee_R.push_back(hrp::Matrix33::Identity());
       act_ee_p.push_back(hrp::Vector3::Zero());
@@ -414,6 +429,9 @@ RTC::ReturnCode_t Stabilizer::onInitialize()
   limb_stretch_avoidance_vlimit[1] = 50 * 1e-3 * dt; // upper limit
   root_rot_compensation_limit[0] = root_rot_compensation_limit[1] = deg2rad(90.0);
   detection_count_to_air = static_cast<int>(0.0 / dt);
+  swing2landing_transition_time = 0.05;
+  landing_phase_time = 0.1;
+  landing2support_transition_time = 0.5;
 
   // parameters for RUNST
   double ke = 0, tc = 0;
@@ -480,7 +498,8 @@ RTC::ReturnCode_t Stabilizer::onInitialize()
   m_originActCogVel.data.x = m_originActCogVel.data.y = m_originActCogVel.data.z = 0.0;
   m_allRefWrench.data.length(stikp.size() * 6); // 6 is wrench dim
   m_allEEComp.data.length(stikp.size() * 6); // 6 is pos+rot dim
-  m_debugData.data.length(1); m_debugData.data[0] = 0.0;
+  // m_debugData.data.length(1); m_debugData.data[0] = 0.0;
+  m_debugData.data.length(stikp.size()); for(size_t i = 0; i < stikp.size(); ++i) m_debugData.data[i] = 0.0;
 
   //
   szd = new SimpleZMPDistributor(dt);
@@ -552,6 +571,9 @@ RTC::ReturnCode_t Stabilizer::onExecute(RTC::UniqueId ec_id)
 
   if (m_qRefIn.isNew()) {
     m_qRefIn.read();
+  }
+  if (m_tauRefIn.isNew()) {
+    m_tauRefIn.read();
   }
   if (m_qCurrentIn.isNew()) {
     m_qCurrentIn.read();
@@ -654,7 +676,12 @@ RTC::ReturnCode_t Stabilizer::onExecute(RTC::UniqueId ec_id)
     if (is_legged_robot) {
       for ( int i = 0; i < m_robot->numJoints(); i++ ){
         m_qRef.data[i] = m_robot->joint(i)->q;
-        //m_tau.data[i] = m_robot->joint(i)->u;
+        m_tau.data[i] = m_robot->joint(i)->u;
+      }
+      if ( m_robot->numJoints() == m_tauRef.data.length() ) {
+        for ( int i = 0; i < m_robot->numJoints(); i++ ){
+          m_tau.data[i] += m_tauRef.data[i];
+        }
       }
       m_zmp.data.x = rel_act_zmp(0);
       m_zmp.data.y = rel_act_zmp(1);
@@ -688,7 +715,8 @@ RTC::ReturnCode_t Stabilizer::onExecute(RTC::UniqueId ec_id)
       m_actContactStatesOut.write();
       m_COPInfo.tm = m_qRef.tm;
       m_COPInfoOut.write();
-      //m_tauOut.write();
+      m_tau.tm = m_qRef.tm;
+      m_tauOut.write();
       // for debug output
       m_originRefZmp.data.x = ref_zmp(0); m_originRefZmp.data.y = ref_zmp(1); m_originRefZmp.data.z = ref_zmp(2);
       m_originRefCog.data.x = ref_cog(0); m_originRefCog.data.y = ref_cog(1); m_originRefCog.data.z = ref_cog(2);
@@ -718,6 +746,7 @@ RTC::ReturnCode_t Stabilizer::onExecute(RTC::UniqueId ec_id)
               m_allEEComp.data[6*i+j] = stikp[i].d_foot_pos(j);
               m_allEEComp.data[6*i+j+3] = stikp[i].d_foot_rpy(j);
           }
+          m_debugData.data[i] = stikp[i].contact_phase;
       }
       m_allRefWrench.tm = m_qRef.tm;
       m_allRefWrenchOut.write();
@@ -1130,6 +1159,10 @@ void Stabilizer::getActualParameters ()
       calcDiffFootOriginExtMoment ();
     }
   } // st_algorithm == OpenHRP::StabilizerService::EEFM
+
+  if ( joint_control_mode == OpenHRP::RobotHardwareService::TORQUE && control_mode == MODE_ST ) setSwingSupportJointServoGains();
+  calcExternalForce(foot_origin_rot * act_cog + foot_origin_pos, foot_origin_rot * new_refzmp + foot_origin_pos, foot_origin_rot);// foot origin relative => Actual world frame
+  calcTorque(foot_origin_rot);
 
   for ( int i = 0; i < m_robot->numJoints(); i++ ){
     m_robot->joint(i)->q = qrefv[i];
@@ -1652,6 +1685,7 @@ void Stabilizer::calcEEForceMomentControl() {
           }
         }
       }
+
 }
 
 // Swing ee compensation.
@@ -1861,12 +1895,30 @@ void Stabilizer::startStabilizer(void)
         }
     }
     waitSTTransition();
+    if ( joint_control_mode == OpenHRP::RobotHardwareService::TORQUE ) {
+        std::cerr << "[" << m_profile.instance_name << "] " << "Moved to ST command pose and sync to TORQUE mode"  << std::endl;
+        m_robotHardwareService0->setServoGainPercentage("all",100);//tmp
+        m_robotHardwareService0->setServoTorqueGainPercentage("all",100);
+        for(size_t i = 0; i < stikp.size(); i++) {
+            STIKParam& ikp = stikp[i];
+            hrp::JointPathExPtr jpe = jpe_v[i];
+            for(size_t j = 0; j < ikp.support_pgain.size(); j++) {
+                m_robotHardwareService0->setServoPGainPercentageWithTime(jpe->joint(j)->name.c_str(),ikp.support_pgain(j),3);
+                m_robotHardwareService0->setServoDGainPercentageWithTime(jpe->joint(j)->name.c_str(),ikp.support_dgain(j),3);
+            }
+        }
+    }
     std::cerr << "[" << m_profile.instance_name << "] " << "Start ST DONE"  << std::endl;
 }
 
 void Stabilizer::stopStabilizer(void)
 {
     waitSTTransition(); // Wait until all transition has finished
+    if ( joint_control_mode == OpenHRP::RobotHardwareService::TORQUE ) {
+        m_robotHardwareService0->setServoGainPercentage("all",100);
+        usleep(5*200*dt* 1e6);
+        m_robotHardwareService0->setServoTorqueGainPercentage("all",0);
+    }
     {
         Guard guard(m_mutex);
         if ( (control_mode == MODE_ST || control_mode == MODE_AIR) ) {
@@ -2064,6 +2116,25 @@ void Stabilizer::getParameter(OpenHRP::StabilizerService::stParam& i_stp)
       ilp.manipulability_limit = jpe_v[i]->getManipulabilityLimit();
       ilp.ik_loop_count = stikp[i].ik_loop_count; // size_t -> unsigned short, value may change, but ik_loop_count is small value and value not change
   }
+  i_stp.swing2landing_transition_time = swing2landing_transition_time;
+  i_stp.landing_phase_time = landing_phase_time;
+  i_stp.landing2support_transition_time = landing2support_transition_time;
+  i_stp.joint_control_mode = joint_control_mode;
+  i_stp.joint_servo_control_parameters.length(stikp.size());
+  for (size_t i = 0; i < stikp.size(); i++) {
+      OpenHRP::StabilizerService::JointServoControlParameter& jscp = i_stp.joint_servo_control_parameters[i];
+      jscp.support_pgain.length(stikp[i].support_pgain.size());
+      jscp.support_dgain.length(stikp[i].support_dgain.size());
+      jscp.landing_pgain.length(stikp[i].landing_pgain.size());
+      jscp.landing_dgain.length(stikp[i].landing_dgain.size());
+      for (size_t j=0; j < stikp[i].support_pgain.size(); j++) {
+          jscp.support_pgain[j] = stikp[i].support_pgain(j);
+          jscp.support_dgain[j] = stikp[i].support_dgain(j);
+          jscp.landing_pgain[j] = stikp[i].landing_pgain(j);
+          jscp.landing_dgain[j] = stikp[i].landing_dgain(j);
+      }
+  }
+
 };
 
 void Stabilizer::setParameter(const OpenHRP::StabilizerService::stParam& i_stp)
@@ -2366,6 +2437,70 @@ void Stabilizer::setParameter(const OpenHRP::StabilizerService::stParam& i_stp)
       }
       std::cerr << "]" << std::endl;
   }
+  // joint servo control parameters
+  std::cerr << "[" << m_profile.instance_name << "]  joint servo control parameters" << std::endl;
+  if (control_mode == MODE_IDLE) {
+      // !TORQUE -> TORQUE
+      if( joint_control_mode != OpenHRP::RobotHardwareService::TORQUE && i_stp.joint_control_mode == OpenHRP::RobotHardwareService::TORQUE ){
+          for(size_t i = 0; i < stikp.size(); i++) {
+              STIKParam& ikp = stikp[i];
+              ikp.eefm_pos_damping_gain *= 1000;
+              ikp.eefm_rot_damping_gain *= 1000;
+          }
+          eefm_swing_pos_damping_gain *= 1000;
+          eefm_swing_rot_damping_gain *= 1000;
+      }
+      // TORQUE -> !TORQUE
+      if( joint_control_mode == OpenHRP::RobotHardwareService::TORQUE && i_stp.joint_control_mode != OpenHRP::RobotHardwareService::TORQUE ){
+          for(size_t i = 0; i < stikp.size(); i++) {
+              STIKParam& ikp = stikp[i];
+              ikp.eefm_pos_damping_gain /= 1000;
+              ikp.eefm_rot_damping_gain /= 1000;
+          }
+          eefm_swing_pos_damping_gain /= 1000;
+          eefm_swing_rot_damping_gain /= 1000;
+      }
+      joint_control_mode = i_stp.joint_control_mode;
+      std::cerr << "[" << m_profile.instance_name << "]   joint_control_mode changed" << std::endl;
+  } else {
+      std::cerr << "[" << m_profile.instance_name << "]   joint_control_mode cannot be changed during MODE_AIR or MODE_ST." << std::endl;
+  }
+  swing2landing_transition_time = i_stp.swing2landing_transition_time;
+  landing_phase_time = i_stp.landing_phase_time;
+  landing2support_transition_time = i_stp.landing2support_transition_time;
+  bool is_joint_servo_control_parameter_valid_length = true;
+  if ( i_stp.joint_servo_control_parameters.length() == stikp.size() ) {
+      for (size_t i = 0; i < stikp.size(); i++) {
+          const OpenHRP::StabilizerService::JointServoControlParameter& jscp = i_stp.joint_servo_control_parameters[i];
+          if ( stikp[i].support_pgain.size() == i_stp.joint_servo_control_parameters[i].support_pgain.length() &&
+               stikp[i].support_dgain.size() == i_stp.joint_servo_control_parameters[i].support_dgain.length() &&
+               stikp[i].landing_pgain.size() == i_stp.joint_servo_control_parameters[i].landing_pgain.length() &&
+               stikp[i].landing_dgain.size() == i_stp.joint_servo_control_parameters[i].landing_dgain.length() ) {
+              for (size_t j = 0; j < stikp[i].support_pgain.size(); j++) {
+                  stikp[i].support_pgain(j) = i_stp.joint_servo_control_parameters[i].support_pgain[j];
+                  stikp[i].support_dgain(j) = i_stp.joint_servo_control_parameters[i].support_dgain[j];
+                  stikp[i].landing_pgain(j) = i_stp.joint_servo_control_parameters[i].landing_pgain[j];
+                  stikp[i].landing_dgain(j) = i_stp.joint_servo_control_parameters[i].landing_dgain[j];
+              }
+          } else is_joint_servo_control_parameter_valid_length = false;
+      }
+  } else {
+      is_joint_servo_control_parameter_valid_length = false;
+  }
+  if ( is_joint_servo_control_parameter_valid_length ) {
+      std::cerr << "[" << m_profile.instance_name << "]   support_pgain = [";
+      for (size_t i = 0; i < stikp.size(); i++) std::cerr << "[" << stikp[i].support_pgain.transpose() << "],";
+      std::cerr << "]" << std::endl;
+      std::cerr << "[" << m_profile.instance_name << "]   support_dgain = [";
+      for (size_t i = 0; i < stikp.size(); i++) std::cerr << "[" << stikp[i].support_dgain.transpose() << "],";
+      std::cerr << "]" << std::endl;
+      std::cerr << "[" << m_profile.instance_name << "]   landing_pgain = [";
+      for (size_t i = 0; i < stikp.size(); i++) std::cerr << "[" << stikp[i].landing_pgain.transpose() << "],";
+      std::cerr << "]" << std::endl;
+      std::cerr << "[" << m_profile.instance_name << "]   landing_dgain = [";
+      for (size_t i = 0; i < stikp.size(); i++) std::cerr << "[" << stikp[i].landing_dgain.transpose() << "],";
+      std::cerr << "]" << std::endl;
+  } else std::cerr << "[" << m_profile.instance_name << "]   servo gain parameters cannot be set because of invalid param." << std::endl;
 }
 
 std::string Stabilizer::getStabilizerAlgorithmString (OpenHRP::StabilizerService::STAlgorithm _st_algorithm)
@@ -2728,6 +2863,51 @@ void Stabilizer::calcRUNST() {
   }
 }
 
+void Stabilizer::setSwingSupportJointServoGains(){
+    static double tmp_landing2support_transition_time = landing2support_transition_time;
+    for (size_t i = 0; i < stikp.size(); i++) {
+        STIKParam& ikp = stikp[i];
+        hrp::JointPathExPtr jpe = jpe_v[i];
+        if (ikp.contact_phase == SWING_PHASE && !ref_contact_states[i] && m_controlSwingSupportTime.data[i] < swing2landing_transition_time+landing_phase_time) { // SWING -> LANDING
+            ikp.contact_phase = LANDING_PHASE;
+            ikp.phase_time = 0;
+            for(size_t j = 0; j < ikp.support_pgain.size(); j++) {
+                m_robotHardwareService0->setServoPGainPercentageWithTime(jpe->joint(j)->name.c_str(),ikp.landing_pgain(j),swing2landing_transition_time);
+                m_robotHardwareService0->setServoDGainPercentageWithTime(jpe->joint(j)->name.c_str(),ikp.landing_dgain(j),swing2landing_transition_time);
+            }
+        }
+        if (ikp.contact_phase == LANDING_PHASE && act_contact_states[i] && ref_contact_states[i] && ikp.phase_time > swing2landing_transition_time) { // LANDING -> SUPPORT
+            ikp.contact_phase = SUPPORT_PHASE;
+            ikp.phase_time = 0;
+            tmp_landing2support_transition_time = std::min(landing2support_transition_time, m_controlSwingSupportTime.data[i]);
+            for(size_t j = 0; j < ikp.support_pgain.size(); j++) {
+                m_robotHardwareService0->setServoPGainPercentageWithTime(jpe->joint(j)->name.c_str(),ikp.support_pgain(j),tmp_landing2support_transition_time);
+                m_robotHardwareService0->setServoDGainPercentageWithTime(jpe->joint(j)->name.c_str(),ikp.support_dgain(j),tmp_landing2support_transition_time);
+            }
+        }
+        // if (ikp.contact_phase == SUPPORT_PHASE && !act_contact_states[i] && ikp.phase_time > tmp_landing2support_transition_time) { // SUPPORT -> SWING
+        if (ikp.contact_phase == SUPPORT_PHASE && !act_contact_states[i] && ikp.phase_time > tmp_landing2support_transition_time
+            && ( (ref_contact_states[i] && m_controlSwingSupportTime.data[i] < 0.2) || !ref_contact_states[i] )) { // SUPPORT -> SWING
+            ikp.contact_phase = SWING_PHASE;
+            ikp.phase_time = 0;
+        }
+        ikp.phase_time += dt;
+    }
+}
+
+void Stabilizer::calcExternalForce(const hrp::Vector3& cog, const hrp::Vector3& zmp, const hrp::Matrix33& rot){
+    // cog, zmp must be in the same coords with stikp.ref_forece
+    hrp::Vector3 total_force = hrp::Vector3::Zero();
+    for (size_t j = 0; j < stikp.size(); j++) {
+        total_force(2) += stikp[j].ref_force(2);// only fz
+    }
+    total_force.segment(0,2) = (cog.segment(0,2) - zmp.segment(0,2))*total_force(2)/(cog(2) - zmp(2));// overwrite fxy
+    for (size_t j = 0; j < stikp.size(); j++) {
+        STIKParam& ikp = stikp[j];
+        if (on_ground && total_force(2) > 1e-6) ikp.ref_force.segment(0,2) += rot.transpose() * total_force.segment(0,2) * ikp.ref_force(2)/total_force(2);// set fx,fy
+    }
+}
+
 void Stabilizer::calcContactMatrix (hrp::dmatrix& tm, const std::vector<hrp::Vector3>& contact_p)
 {
   // tm.resize(6,6*contact_p.size());
@@ -2741,7 +2921,7 @@ void Stabilizer::calcContactMatrix (hrp::dmatrix& tm, const std::vector<hrp::Vec
   // }
 }
 
-void Stabilizer::calcTorque ()
+void Stabilizer::calcTorque (const hrp::Matrix33& rot)
 {
   m_robot->calcForwardKinematics();
   // buffers for the unit vector method
@@ -2791,20 +2971,29 @@ void Stabilizer::calcTorque ()
   //   // std::cerr << ":aa "; rats::print_matrix(std::cerr, aa);
   //   // std::cerr << ":dv "; rats::print_vector(std::cerr, dv);
   // }
-  for (size_t j = 0; j < 2; j++) {
-    hrp::JointPathEx jm = hrp::JointPathEx(m_robot, m_robot->rootLink(), m_robot->sensor<hrp::ForceSensor>(stikp[j].sensor_name)->link, dt);
-    hrp::dmatrix JJ;
-    jm.calcJacobian(JJ);
-    hrp::dvector ft(6);
-    for (size_t i = 0; i < 6; i++) ft(i) = contact_ft(i+j*6);
-    hrp::dvector tq_from_extft(jm.numJoints());
-    tq_from_extft = JJ.transpose() * ft;
-    // if (loop%200==0) {
-    //   std::cerr << ":ft "; rats::print_vector(std::cerr, ft);
-    //   std::cerr << ":JJ "; rats::print_matrix(std::cerr, JJ);
-    //   std::cerr << ":tq_from_extft "; rats::print_vector(std::cerr, tq_from_extft);
-    // }
-    for (size_t i = 0; i < jm.numJoints(); i++) jm.joint(i)->u -= tq_from_extft(i);
+  // for (size_t j = 0; j < 2; j++) {//numContacts
+    // hrp::JointPathEx jm = hrp::JointPathEx(m_robot, m_robot->rootLink(), m_robot->sensor<hrp::ForceSensor>(stikp[j].sensor_name)->link, dt);
+  if ( control_mode == MODE_ST ) {
+      for (size_t j = 0; j < stikp.size(); j++) {
+          STIKParam& ikp = stikp[j];
+          hrp::Link* target = m_robot->link(ikp.target_name);
+          size_t idx = contact_states_index_map[ikp.ee_name];
+          hrp::JointPathEx jm = hrp::JointPathEx(m_robot, m_robot->rootLink(), target, dt);
+          hrp::dmatrix JJ;
+          jm.calcJacobian(JJ);
+          hrp::dvector ft(6);
+          // for (size_t i = 0; i < 6; i++) ft(i) = contact_ft(i+j*6);
+          ft.segment(0,3) = rot * ikp.ref_force;
+          ft.segment(3,3) = rot * ikp.ref_moment;
+          hrp::dvector tq_from_extft(jm.numJoints());
+          tq_from_extft = JJ.transpose() * ft;
+          // if (loop%200==0) {
+          //   std::cerr << ":ft "; rats::print_vector(std::cerr, ft);
+          //   std::cerr << ":JJ "; rats::print_matrix(std::cerr, JJ);
+          //   std::cerr << ":tq_from_extft "; rats::print_vector(std::cerr, tq_from_extft);
+          // }
+          for (size_t i = 0; i < jm.numJoints(); i++) jm.joint(i)->u -= tq_from_extft(i);
+      }
   }
   //hrp::dmatrix MM(6,m_robot->numJoints());
   //m_robot->calcMassMatrix(MM);

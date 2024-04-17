@@ -325,6 +325,13 @@ class HrpsysConfigurator(object):
             else:
                 connectPorts(self.sh.port("qOut"), self.rh.port("qRef"))
 
+        # connection for reference torque
+        if self.st:
+            connectPorts(self.sh.port("tqOut"), self.st.port("tauRef"))
+            connectPorts(self.st.port("tau"), self.rh.port("tauRef"))
+        else:
+            connectPorts(self.sh.port("tqOut"), self.rh.port("tauRef"))
+
         # only for kinematics simulator
         if rtm.findPort(self.rh.ref, "basePoseRef"):
             self.kinematics_only_mode = True
@@ -410,6 +417,7 @@ class HrpsysConfigurator(object):
                 connectPorts(self.rfu.port("refFootOriginExtMomentIsHoldValue"), self.abc.port("refFootOriginExtMomentIsHoldValue"))
             if self.octd:
                 connectPorts(self.abc.port("contactStates"), self.octd.port("contactStates"))
+            connectPorts(self.st.port("RobotHardwareService"), self.rh.port("RobotHardwareService"))
 
         # ref force moment connection
         for sen in self.getForceSensorNames():
@@ -906,6 +914,7 @@ class HrpsysConfigurator(object):
             self.connectLoggerPort(self.st, 'currentBasePos')
             self.connectLoggerPort(self.st, 'currentBaseRpy')
             self.connectLoggerPort(self.st, 'debugData')
+            self.connectLoggerPort(self.st, 'tau')
         if self.el != None:
             self.connectLoggerPort(self.el, 'q')
         if self.rh != None:

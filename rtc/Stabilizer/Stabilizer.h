@@ -30,6 +30,8 @@
 #include "../ImpedanceController/RatsMatrix.h"
 #include "../TorqueFilter/IIRFilter.h"
 
+#include "hrpsys/idl/RobotHardwareService.hh"
+
 // </rtc-template>
 
 // Service Consumer stub headers
@@ -128,7 +130,9 @@ class Stabilizer
   void waitSTTransition();
   // funcitons for calc final torque output
   void calcContactMatrix (hrp::dmatrix& tm, const std::vector<hrp::Vector3>& contact_p);
-  void calcTorque ();
+  void setSwingSupportJointServoGains();
+  void calcExternalForce (const hrp::Vector3& cog, const hrp::Vector3& zmp, const hrp::Matrix33& rot);
+  void calcTorque (const hrp::Matrix33& rot);
   void fixLegToCoords (const std::string& leg, const rats::coordinates& coords);
   void getFootmidCoords (rats::coordinates& ret);
   double calcDampingControl (const double tau_d, const double tau, const double prev_d,
@@ -159,6 +163,7 @@ class Stabilizer
   // </rtc-template>
   RTC::TimedDoubleSeq m_qCurrent;
   RTC::TimedDoubleSeq m_qRef;
+  RTC::TimedDoubleSeq m_tauRef;
   RTC::TimedDoubleSeq m_tau;
   RTC::TimedOrientation3D m_rpy;
   RTC::TimedPoint3D m_zmpRef;
@@ -193,6 +198,7 @@ class Stabilizer
   // <rtc-template block="inport_declare">
   RTC::InPort<RTC::TimedDoubleSeq> m_qCurrentIn;
   RTC::InPort<RTC::TimedDoubleSeq> m_qRefIn;
+  RTC::InPort<RTC::TimedDoubleSeq> m_tauRefIn;
   RTC::InPort<RTC::TimedOrientation3D> m_rpyIn;
   RTC::InPort<RTC::TimedPoint3D> m_zmpRefIn;
   RTC::InPort<RTC::TimedPoint3D> m_basePosIn;
@@ -238,6 +244,7 @@ class Stabilizer
 
   // CORBA Port declaration
   // <rtc-template block="corbaport_declare">
+  RTC::CorbaPort m_RobotHardwareServicePort;
   
   // </rtc-template>
 
@@ -250,10 +257,12 @@ class Stabilizer
   // Consumer declaration
   // <rtc-template block="consumer_declare">
   StabilizerService_impl m_service0;
-  
+  RTC::CorbaConsumer<OpenHRP::RobotHardwareService> m_robotHardwareService0;
+
   // </rtc-template>
 
  private:
+  enum cphase {LANDING_PHASE=-1, SWING_PHASE=0, SUPPORT_PHASE=1};
   // Stabilizer Parameters
   struct STIKParam {
     std::string target_name; // Name of end link
@@ -277,6 +286,10 @@ class Stabilizer
     // IK parameter
     double avoid_gain, reference_gain, max_limb_length, limb_length_margin;
     size_t ik_loop_count;
+    // joint servo control parameter
+    cphase contact_phase;
+    double phase_time;
+    hrp::dvector support_pgain,support_dgain,landing_pgain,landing_dgain;
   };
   enum cmode {MODE_IDLE, MODE_AIR, MODE_ST, MODE_SYNC_TO_IDLE, MODE_SYNC_TO_AIR} control_mode;
   // members
@@ -331,6 +344,9 @@ class Stabilizer
   // Total foot moment around the foot origin coords (relative to foot origin coords)
   hrp::Vector3 ref_total_foot_origin_moment, act_total_foot_origin_moment;
   hrp::Vector3 eefm_swing_pos_damping_gain, eefm_swing_rot_damping_gain;
+  // joint servo control
+  OpenHRP::RobotHardwareService::JointControlMode joint_control_mode;
+  double swing2landing_transition_time, landing_phase_time, landing2support_transition_time;
   double total_mass, transition_time, cop_check_margin, contact_decision_threshold;
   std::vector<double> cp_check_margin, tilt_margin;
   OpenHRP::StabilizerService::EmergencyCheckMode emergency_check_mode;
